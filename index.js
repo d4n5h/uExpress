@@ -1,13 +1,9 @@
-const { flatten } = require('array-flatten');
-const uWS = require('uWebSockets.js');
-var slice = Array.prototype.slice;
-var pathMatch = require('path-match')({
-    sensitive: false,
-    strict: false,
-    end: false,
-});
+const uWS = require('uWebSockets.js'),
+    fs = require('fs'),
+    p = require('path'),
+    slice = Array.prototype.slice;
 
-const parseQuery = function (query) {
+function parseQuery(query) {
     query = query.split('&');
     let results = {};
     for (let i = 0; i < query.length; i++) {
@@ -19,29 +15,59 @@ const parseQuery = function (query) {
     return results;
 }
 
-const parseReq = function (path, req) {
-    req.query = parseQuery(req.getQuery());
-    let basePath = req.getUrl().split('/')
-    delete basePath[0]
-    delete basePath[1]
-    basePath = basePath.join('/').replace(/\/+/g, '\/')
-    const match = pathMatch(path);
-    req.params = match(basePath);
-    return req;
+function toArrayBuffer(buffer) {
+    return buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength);
 }
+
+function onAbortedOrFinishedResponse(res, readStream) {
+    if (res.id != -1) {
+        readStream.destroy();
+    }
+    res.id = -1;
+}
+
+function pipeStreamOverResponse(res, readStream, totalSize) {
+    readStream.on('data', (chunk) => {
+        const ab = toArrayBuffer(chunk);
+        let lastOffset = res.getWriteOffset();
+        let [ok, done] = res.tryEnd(ab, totalSize);
+        if (done) {
+            onAbortedOrFinishedResponse(res, readStream);
+        } else if (!ok) {
+            readStream.pause();
+            res.ab = ab;
+            res.abOffset = lastOffset;
+
+            res.onWritable((offset) => {
+                let [ok, done] = res.tryEnd(res.ab.slice(offset - res.abOffset), totalSize);
+                if (done) {
+                    onAbortedOrFinishedResponse(res, readStream);
+                } else if (ok) {
+                    readStream.resume();
+                }
+                return ok;
+            });
+        }
+
+    }).on('error', () => {
+        console.log('Unhandled read error from Node.js, you need to handle this!');
+    });
+};
 
 const methods = ['get', 'post', 'put', 'del', 'any', 'ws', 'patch', 'listen', 'connect', 'options', 'trace', 'publish', 'head']
 const exclude = ['ws', 'listen', 'connect', 'options', 'trace']
 
 const uExpress = function (options = {}) {
+    this.uWS = uWS;
     if (options.ssl) {
-        this.app = uWS.SSLApp(options.ssl);
+        this.app = this.uWS.SSLApp(options.ssl);
     } else {
-        this.app = uWS.App();
+        this.app = this.uWS.App();
     }
 
     this.stack = [];
     this.req = {};
+
 
     this.bodyParser = function (type, res, cb) {
         let buffer;
@@ -125,7 +151,7 @@ const uExpress = function (options = {}) {
             }
         }
 
-        const callbacks = flatten(slice.call(arguments, offset));
+        const callbacks = (slice.call(arguments, offset)).flat();;
 
         callbacks.forEach((callback) => {
             if (callback.stack) {
@@ -134,7 +160,7 @@ const uExpress = function (options = {}) {
                     this.stack.push({
                         path: path + cb.path, isMw: cb.isMw, method: cb.method, callback: function (res, req) {
                             req = Object.assign(req, this.req)
-                            req = parseReq(cb.path, req);
+                            req.query = parseQuery(req.getQuery());
                             cb.callback(res, req)
                         }
                     })
@@ -152,7 +178,7 @@ const uExpress = function (options = {}) {
                 this.stack.push({
                     path: path, isMw: true, method: 'any', callback: (res, req) => {
                         req = Object.assign(req, this.req)
-                        req = parseReq(path, req);
+                        req.query = parseQuery(req.getQuery());
                         req.setYield(true);
                         res.onAborted(() => {
                             res.aborted = true;
@@ -171,7 +197,7 @@ const uExpress = function (options = {}) {
             this.stack.push({
                 path: path, method: method, callback: function (res, req) {
                     req = Object.assign(req, that.req)
-                    req = parseReq(path, req);
+                    req.query = parseQuery(req.getQuery());
                     callback(res, req)
                 }
             })
@@ -180,6 +206,22 @@ const uExpress = function (options = {}) {
     });
 
     this.listen = function (port, cb) {
+        if (this.req.static) {
+            this.get(this.req.static, (res, req) => {
+                const filename = p.join(__dirname, req.getUrl())
+                if (fs.existsSync(filename)) {
+                    const totalSize = fs.statSync(filename).size;
+                    const readStream = fs.createReadStream(filename);
+                    pipeStreamOverResponse(res, readStream, totalSize);
+                    res.onAborted(() => {
+                        res.aborted = true;
+                    });
+                } else {
+                    res.writeStatus('404').end()
+                }
+            })
+        }
+
         for (let i = 0; i < this.stack.length; i++) {
             const route = this.stack[i];
             if (route.path.includes('*') && route.isMw) {
