@@ -26,6 +26,5 @@
     "array-flatten": "^3.0.0",
     "path-match": "^1.2.4",
     "uWebSockets.js": "github:uNetworking/uWebSockets.js#v18.3.0"
-  },
-  "type": "module"
+  }
 }
