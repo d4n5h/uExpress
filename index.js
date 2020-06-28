@@ -55,16 +55,18 @@ const uExpress = function (options = {}) {
                         try {
                             json = JSON.parse(Buffer.concat([buffer, chunk]));
                         } catch (e) {
-                            err = true;
+                            err = e;
+                        } finally {
+                            cb(json, err);
                         }
-                        cb(json, err);
                     } else {
                         try {
                             json = JSON.parse(chunk);
                         } catch (e) {
-                            err = true;
+                            err = e;
+                        } finally {
+                            cb(json, err);
                         }
-                        cb(json, err);
                     }
                 } else {
                     if (buffer) {
@@ -93,8 +95,8 @@ const uExpress = function (options = {}) {
                         }
                     }
                 });
-            } catch (error) {
-                err = error
+            } catch (e) {
+                err = e
             }
         }
 
