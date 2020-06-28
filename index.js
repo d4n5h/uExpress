@@ -31,6 +31,7 @@ const parseReq = function (path, req) {
 }
 
 const methods = ['get', 'post', 'put', 'del', 'any', 'ws', 'patch', 'listen', 'connect', 'options', 'trace', 'publish', 'head']
+const exclude = ['ws', 'listen', 'connect', 'options', 'trace']
 
 const uExpress = function (options = {}) {
     if (options.ssl) {
@@ -116,7 +117,6 @@ const uExpress = function (options = {}) {
                 arg = arg[0];
             }
 
-            // first arg is the path
             if (typeof arg !== 'function') {
                 offset = 1;
                 path = fn;
@@ -148,10 +148,10 @@ const uExpress = function (options = {}) {
                     path = '/*'
                 }
                 this.stack.push({
-                    path: path, method: 'any', callback: (res, req) => {
+                    path: path, isMw: true, method: 'any', callback: (res, req) => {
                         req = Object.assign(req, this.req)
                         req = parseReq(path, req);
-                        // req.setYield(true);
+                        req.setYield(true);
                         res.onAborted(() => {
                             res.aborted = true;
                         });
@@ -163,11 +163,12 @@ const uExpress = function (options = {}) {
         return this;
     };
 
+    const that = this;
     methods.forEach(method => {
         uExpress.prototype[method] = function (path, callback) {
             this.stack.push({
                 path: path, method: method, callback: function (res, req) {
-                    req = Object.assign(req, this.req)
+                    req = Object.assign(req, that.req)
                     req = parseReq(path, req);
                     callback(res, req)
                 }
@@ -179,7 +180,17 @@ const uExpress = function (options = {}) {
     this.listen = function (port, cb) {
         for (let i = 0; i < this.stack.length; i++) {
             const route = this.stack[i];
-            this.app[route.method](route.path, route.callback)
+            if (route.path.includes('*') && route.isMw) {
+                const base = route.path.split('*')[0];
+                for (let x = 0; x < this.stack.length; x++) {
+                    if (this.stack[x].path.includes(base) && !this.stack[x].path.includes('*') && !this.stack[x].isMw && !exclude.includes(this.stack[x].method)) {
+                        this.app[this.stack[x].method](this.stack[x].path, route.callback)
+                    }
+                }
+
+            } else {
+                this.app[route.method](route.path, route.callback)
+            }
         }
         this.app.listen(port, cb);
 
