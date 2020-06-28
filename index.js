@@ -130,7 +130,7 @@ const uExpress = function (options = {}) {
                 req = Object.assign(callback.req, this.req)
                 callback.stack.forEach((cb) => {
                     this.stack.push({
-                        path: path + cb.path, method: cb.method, callback: function (res, req) {
+                        path: path + cb.path, isMw: cb.isMw, method: cb.method, callback: function (res, req) {
                             req = Object.assign(req, this.req)
                             req = parseReq(cb.path, req);
                             cb.callback(res, req)
@@ -187,7 +187,6 @@ const uExpress = function (options = {}) {
                         this.app[this.stack[x].method](this.stack[x].path, route.callback)
                     }
                 }
-
             } else {
                 this.app[route.method](route.path, route.callback)
             }
