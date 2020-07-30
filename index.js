@@ -1,6 +1,7 @@
 const uWS = require('uWebSockets.js'),
     fs = require('fs'),
     p = require('path'),
+    mime = require('mime-types'),
     slice = Array.prototype.slice;
 
 function parseQuery(query) {
@@ -13,6 +14,33 @@ function parseQuery(query) {
         }
     }
     return results;
+}
+
+function status(status) {
+    this.writeStatus(String(status))
+    return this
+}
+
+function send(data) {
+    this.end(data)
+    return this
+}
+
+function sendFile(filePath) {
+    const contentType = mime.lookup(filePath);
+    this.writeHeader('Content-Type', contentType);
+    const totalSize = fs.statSync(filePath).size;
+    const readStream = fs.createReadStream(filePath);
+    pipeStreamOverResponse(this, readStream, totalSize);
+    return this
+}
+
+
+function json(data) {
+    this.writeHeader('Content-Type', 'text/html; charset=utf-8');
+    this.writeHeader('Content-Type', 'text/json');
+    this.end(JSON.stringify(data))
+    return this
 }
 
 function toArrayBuffer(buffer) {
@@ -49,8 +77,8 @@ function pipeStreamOverResponse(res, readStream, totalSize) {
             });
         }
 
-    }).on('error', () => {
-        console.log('Unhandled read error from Node.js, you need to handle this!');
+    }).on('error', (err) => {
+        console.log(err);
     });
 };
 
@@ -68,6 +96,19 @@ const uExpress = function (options = {}) {
     this.stack = [];
     this.req = {};
 
+    this.patchReq = (req) => {
+        req = Object.assign(req, this.req);
+        req.query = parseQuery(req.getQuery());
+        return req;
+    }
+
+    this.patchRes = (res) => {
+        res.json = json;
+        res.status = status;
+        res.send = send;
+        res.sendFile = sendFile;
+        return res;
+    };
 
     this.bodyParser = function (type, res, cb) {
         let buffer;
@@ -108,21 +149,21 @@ const uExpress = function (options = {}) {
                     let chunk = Buffer.from(ab);
                     if (isLast) {
                         if (buffer) {
-                            buffer += String(chunk)
+                            buffer += String(chunk);
                         } else {
-                            buffer = String(chunk)
+                            buffer = String(chunk);
                         }
-                        cb(buffer)
+                        cb(buffer);
                     } else {
                         if (buffer) {
-                            buffer += String(chunk)
+                            buffer += String(chunk);
                         } else {
-                            buffer = String(chunk)
+                            buffer = String(chunk);
                         }
                     }
                 });
             } catch (e) {
-                err = e
+                err = e;
             }
         }
 
@@ -159,9 +200,9 @@ const uExpress = function (options = {}) {
                 callback.stack.forEach((cb) => {
                     this.stack.push({
                         path: path + cb.path, isMw: cb.isMw, method: cb.method, callback: function (res, req) {
-                            req = Object.assign(req, this.req)
-                            req.query = parseQuery(req.getQuery());
-                            cb.callback(res, req)
+                            req = this.parseQuery(req);
+                            res = this.patchRes(res);
+                            cb.callback(res, req);
                         }
                     })
                 })
@@ -173,13 +214,13 @@ const uExpress = function (options = {}) {
                 }
             } else {
                 if (path == '/') {
-                    path = '/*'
+                    path = '/*';
                 }
                 this.stack.push({
                     path: path, isMw: true, method: 'any', callback: (res, req) => {
-                        req = Object.assign(req, this.req)
-                        req.query = parseQuery(req.getQuery());
+                        req = this.patchReq(req);
                         req.setYield(true);
+                        res = this.patchRes(res);
                         res.onAborted(() => {
                             res.aborted = true;
                         });
@@ -196,20 +237,22 @@ const uExpress = function (options = {}) {
         uExpress.prototype[method] = function (path, callback) {
             this.stack.push({
                 path: path, method: method, callback: function (res, req) {
-                    req = Object.assign(req, that.req)
-                    req.query = parseQuery(req.getQuery());
-                    callback(res, req)
+                    req = that.patchReq(req);
+                    res = that.patchRes(res);
+                    callback(res, req);
                 }
             })
-            return this
+            return this;
         }
     });
 
     this.listen = function (port, cb) {
         if (this.req.static) {
             this.get(this.req.static, (res, req) => {
-                const filename = p.join(__dirname, req.getUrl())
+                const filename = p.join(process.cwd(), req.getUrl());
                 if (fs.existsSync(filename)) {
+                    const contentType = mime.lookup(filename);
+                    res.writeHeader('Content-Type', contentType);
                     const totalSize = fs.statSync(filename).size;
                     const readStream = fs.createReadStream(filename);
                     pipeStreamOverResponse(res, readStream, totalSize);
@@ -228,11 +271,11 @@ const uExpress = function (options = {}) {
                 const base = route.path.split('*')[0];
                 for (let x = 0; x < this.stack.length; x++) {
                     if (this.stack[x].path.includes(base) && !this.stack[x].path.includes('*') && !this.stack[x].isMw && !exclude.includes(this.stack[x].method)) {
-                        this.app[this.stack[x].method](this.stack[x].path, route.callback)
+                        this.app[this.stack[x].method](this.stack[x].path, route.callback);
                     }
                 }
             } else {
-                this.app[route.method](route.path, route.callback)
+                this.app[route.method](route.path, route.callback);
             }
         }
         this.app.listen(port, cb);
