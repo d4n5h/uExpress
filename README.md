@@ -1,6 +1,11 @@
 # microexpress
 Express alternative built on top of uWebsocket.js
 
+## Install
+```
+github:d4n5h/uExpress
+```
+
 ## This is NOT a direct replacement for Express
 This is just a wrapper around uWebsockets.js to make it a little bit more similar to express without a performence penalty.
 If you want to help and make this project better then be my guest.
