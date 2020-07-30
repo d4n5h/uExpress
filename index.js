@@ -200,7 +200,7 @@ const uExpress = function (options = {}) {
                 callback.stack.forEach((cb) => {
                     this.stack.push({
                         path: path + cb.path, isMw: cb.isMw, method: cb.method, callback: function (res, req) {
-                            req = this.parseQuery(req);
+                            req = this.patchReq(req);
                             res = this.patchRes(res);
                             cb.callback(res, req);
                         }
