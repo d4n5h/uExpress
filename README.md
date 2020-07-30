@@ -3,7 +3,7 @@ Express alternative built on top of uWebsocket.js
 
 ## Install
 ```
-github:d4n5h/uExpress
+npm install d4n5h/uExpress
 ```
 
 ## This is NOT a direct replacement for Express
