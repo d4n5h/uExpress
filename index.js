@@ -1,13 +1,10 @@
-const { flatten } = require('array-flatten');
-const uWS = require('uWebSockets.js');
-var slice = Array.prototype.slice;
-var pathMatch = require('path-match')({
-    sensitive: false,
-    strict: false,
-    end: false,
-});
+const uWS = require('uWebSockets.js'),
+    fs = require('fs'),
+    p = require('path'),
+    mime = require('mime-types'),
+    slice = Array.prototype.slice;
 
-const parseQuery = function (query) {
+function parseQuery(query) {
     query = query.split('&');
     let results = {};
     for (let i = 0; i < query.length; i++) {
@@ -19,28 +16,99 @@ const parseQuery = function (query) {
     return results;
 }
 
-const parseReq = function (path, req) {
-    req.query = parseQuery(req.getQuery());
-    let basePath = req.getUrl().split('/')
-    delete basePath[0]
-    delete basePath[1]
-    basePath = basePath.join('/').replace(/\/+/g, '\/')
-    const match = pathMatch(path);
-    req.params = match(basePath);
-    return req;
+function status(status) {
+    this.writeStatus(String(status))
+    return this
 }
 
+function send(data) {
+    this.end(data)
+    return this
+}
+
+function sendFile(filePath) {
+    const contentType = mime.lookup(filePath);
+    this.writeHeader('Content-Type', contentType);
+    const totalSize = fs.statSync(filePath).size;
+    const readStream = fs.createReadStream(filePath);
+    pipeStreamOverResponse(this, readStream, totalSize);
+    return this
+}
+
+
+function json(data) {
+    this.writeHeader('Content-Type', 'text/html; charset=utf-8');
+    this.writeHeader('Content-Type', 'text/json');
+    this.end(JSON.stringify(data))
+    return this
+}
+
+function toArrayBuffer(buffer) {
+    return buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength);
+}
+
+function onAbortedOrFinishedResponse(res, readStream) {
+    if (res.id != -1) {
+        readStream.destroy();
+    }
+    res.id = -1;
+}
+
+function pipeStreamOverResponse(res, readStream, totalSize) {
+    readStream.on('data', (chunk) => {
+        const ab = toArrayBuffer(chunk);
+        let lastOffset = res.getWriteOffset();
+        let [ok, done] = res.tryEnd(ab, totalSize);
+        if (done) {
+            onAbortedOrFinishedResponse(res, readStream);
+        } else if (!ok) {
+            readStream.pause();
+            res.ab = ab;
+            res.abOffset = lastOffset;
+
+            res.onWritable((offset) => {
+                let [ok, done] = res.tryEnd(res.ab.slice(offset - res.abOffset), totalSize);
+                if (done) {
+                    onAbortedOrFinishedResponse(res, readStream);
+                } else if (ok) {
+                    readStream.resume();
+                }
+                return ok;
+            });
+        }
+
+    }).on('error', (err) => {
+        console.log(err);
+    });
+};
+
 const methods = ['get', 'post', 'put', 'del', 'any', 'ws', 'patch', 'listen', 'connect', 'options', 'trace', 'publish', 'head']
+const exclude = ['ws', 'listen', 'connect', 'options', 'trace']
 
 const uExpress = function (options = {}) {
+    this.uWS = uWS;
     if (options.ssl) {
-        this.app = uWS.SSLApp(options.ssl);
+        this.app = this.uWS.SSLApp(options.ssl);
     } else {
-        this.app = uWS.App();
+        this.app = this.uWS.App();
     }
 
     this.stack = [];
     this.req = {};
+
+    this.patchReq = (req) => {
+        req = Object.assign(req, this.req);
+        req.query = parseQuery(req.getQuery());
+        return req;
+    }
+
+    this.patchRes = (res) => {
+        res.json = json;
+        res.status = status;
+        res.send = send;
+        res.sendFile = sendFile;
+        return res;
+    };
 
     this.bodyParser = function (type, res, cb) {
         let buffer;
@@ -54,16 +122,18 @@ const uExpress = function (options = {}) {
                         try {
                             json = JSON.parse(Buffer.concat([buffer, chunk]));
                         } catch (e) {
-                            err = true;
+                            err = e;
+                        } finally {
+                            cb(json, err);
                         }
-                        cb(json, err);
                     } else {
                         try {
                             json = JSON.parse(chunk);
                         } catch (e) {
-                            err = true;
+                            err = e;
+                        } finally {
+                            cb(json, err);
                         }
-                        cb(json, err);
                     }
                 } else {
                     if (buffer) {
@@ -79,21 +149,21 @@ const uExpress = function (options = {}) {
                     let chunk = Buffer.from(ab);
                     if (isLast) {
                         if (buffer) {
-                            buffer += String(chunk)
+                            buffer += String(chunk);
                         } else {
-                            buffer = String(chunk)
+                            buffer = String(chunk);
                         }
-                        cb(buffer)
+                        cb(buffer);
                     } else {
                         if (buffer) {
-                            buffer += String(chunk)
+                            buffer += String(chunk);
                         } else {
-                            buffer = String(chunk)
+                            buffer = String(chunk);
                         }
                     }
                 });
-            } catch (error) {
-                err = error
+            } catch (e) {
+                err = e;
             }
         }
 
@@ -116,24 +186,23 @@ const uExpress = function (options = {}) {
                 arg = arg[0];
             }
 
-            // first arg is the path
             if (typeof arg !== 'function') {
                 offset = 1;
                 path = fn;
             }
         }
 
-        const callbacks = flatten(slice.call(arguments, offset));
+        const callbacks = (slice.call(arguments, offset)).flat();;
 
         callbacks.forEach((callback) => {
             if (callback.stack) {
                 req = Object.assign(callback.req, this.req)
                 callback.stack.forEach((cb) => {
                     this.stack.push({
-                        path: path + cb.path, method: cb.method, callback: function (res, req) {
-                            req = Object.assign(req, this.req)
-                            req = parseReq(cb.path, req);
-                            cb.callback(res, req)
+                        path: path + cb.path, isMw: cb.isMw, method: cb.method, callback: function (res, req) {
+                            req = this.parseQuery(req);
+                            res = this.patchRes(res);
+                            cb.callback(res, req);
                         }
                     })
                 })
@@ -145,13 +214,13 @@ const uExpress = function (options = {}) {
                 }
             } else {
                 if (path == '/') {
-                    path = '/*'
+                    path = '/*';
                 }
                 this.stack.push({
-                    path: path, method: 'any', callback: (res, req) => {
-                        req = Object.assign(req, this.req)
-                        req = parseReq(path, req);
-                        // req.setYield(true);
+                    path: path, isMw: true, method: 'any', callback: (res, req) => {
+                        req = this.patchReq(req);
+                        req.setYield(true);
+                        res = this.patchRes(res);
                         res.onAborted(() => {
                             res.aborted = true;
                         });
@@ -163,23 +232,51 @@ const uExpress = function (options = {}) {
         return this;
     };
 
+    const that = this;
     methods.forEach(method => {
         uExpress.prototype[method] = function (path, callback) {
             this.stack.push({
                 path: path, method: method, callback: function (res, req) {
-                    req = Object.assign(req, this.req)
-                    req = parseReq(path, req);
-                    callback(res, req)
+                    req = that.patchReq(req);
+                    res = that.patchRes(res);
+                    callback(res, req);
                 }
             })
-            return this
+            return this;
         }
     });
 
     this.listen = function (port, cb) {
+        if (this.req.static) {
+            this.get(this.req.static, (res, req) => {
+                const filename = p.join(process.cwd(), req.getUrl());
+                if (fs.existsSync(filename)) {
+                    const contentType = mime.lookup(filename);
+                    res.writeHeader('Content-Type', contentType);
+                    const totalSize = fs.statSync(filename).size;
+                    const readStream = fs.createReadStream(filename);
+                    pipeStreamOverResponse(res, readStream, totalSize);
+                    res.onAborted(() => {
+                        res.aborted = true;
+                    });
+                } else {
+                    res.writeStatus('404').end()
+                }
+            })
+        }
+
         for (let i = 0; i < this.stack.length; i++) {
             const route = this.stack[i];
-            this.app[route.method](route.path, route.callback)
+            if (route.path.includes('*') && route.isMw) {
+                const base = route.path.split('*')[0];
+                for (let x = 0; x < this.stack.length; x++) {
+                    if (this.stack[x].path.includes(base) && !this.stack[x].path.includes('*') && !this.stack[x].isMw && !exclude.includes(this.stack[x].method)) {
+                        this.app[this.stack[x].method](this.stack[x].path, route.callback);
+                    }
+                }
+            } else {
+                this.app[route.method](route.path, route.callback);
+            }
         }
         this.app.listen(port, cb);
 
