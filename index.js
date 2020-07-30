@@ -193,15 +193,15 @@ const uExpress = function (options = {}) {
         }
 
         const callbacks = (slice.call(arguments, offset)).flat();;
-
+        const that = this;
         callbacks.forEach((callback) => {
             if (callback.stack) {
                 req = Object.assign(callback.req, this.req)
                 callback.stack.forEach((cb) => {
                     this.stack.push({
                         path: path + cb.path, isMw: cb.isMw, method: cb.method, callback: function (res, req) {
-                            req = this.patchReq(req);
-                            res = this.patchRes(res);
+                            req = that.patchReq(req);
+                            res = that.patchRes(res);
                             cb.callback(res, req);
                         }
                     })
