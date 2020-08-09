@@ -198,13 +198,19 @@ const uExpress = function (options = {}) {
             if (callback.stack) {
                 req = Object.assign(callback.req, this.req)
                 callback.stack.forEach((cb) => {
-                    this.stack.push({
-                        path: path + cb.path, isMw: cb.isMw, method: cb.method, callback: function (res, req) {
-                            req = that.patchReq(req);
-                            res = that.patchRes(res);
-                            cb.callback(res, req);
-                        }
-                    })
+                    if (cb.method == 'ws') {
+                        this.stack.push({
+                            path: path + cb.path, isMw: cb.isMw, method: cb.method, callback: cb.callback
+                        })
+                    } else {
+                        this.stack.push({
+                            path: path + cb.path, isMw: cb.isMw, method: cb.method, callback: function (res, req) {
+                                req = that.patchReq(req);
+                                res = that.patchRes(res);
+                                cb.callback(res, req);
+                            }
+                        })
+                    }
                 })
                 const newReqs = Object.keys(callback.req);
                 for (let i = 0; i < newReqs.length; i++) {
@@ -235,13 +241,19 @@ const uExpress = function (options = {}) {
     const that = this;
     methods.forEach(method => {
         uExpress.prototype[method] = function (path, callback) {
-            this.stack.push({
-                path: path, method: method, callback: function (res, req) {
-                    req = that.patchReq(req);
-                    res = that.patchRes(res);
-                    callback(res, req);
-                }
-            })
+            if (method == 'ws') {
+                this.stack.push({
+                    path: path, method: method, callback: callback
+                })
+            } else {
+                this.stack.push({
+                    path: path, method: method, callback: function (res, req) {
+                        req = that.patchReq(req);
+                        res = that.patchRes(res);
+                        callback(res, req);
+                    }
+                })
+            }
             return this;
         }
     });
