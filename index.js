@@ -2,7 +2,12 @@ const uWS = require('uWebSockets.js'),
     fs = require('fs'),
     p = require('path'),
     mime = require('mime-types'),
-    slice = Array.prototype.slice;
+    Busboy = require('busboy'),
+    { v4: uuid } = require('uuid'),
+    querystring = require('querystring'),
+    slice = Array.prototype.slice,
+    methods = ['get', 'post', 'put', 'del', 'any', 'ws', 'patch', 'listen', 'connect', 'options', 'trace', 'publish', 'head'],
+    exclude = ['ws', 'listen', 'connect', 'options', 'trace'];
 
 function parseQuery(query) {
     query = query.split('&');
@@ -35,10 +40,8 @@ function sendFile(filePath) {
     return this
 }
 
-
 function json(data) {
-    this.writeHeader('Content-Type', 'text/html; charset=utf-8');
-    this.writeHeader('Content-Type', 'text/json');
+    this.writeHeader('Content-Type', 'application/json; charset=utf-8');
     this.end(JSON.stringify(data))
     return this
 }
@@ -82,8 +85,144 @@ function pipeStreamOverResponse(res, readStream, totalSize) {
     });
 };
 
-const methods = ['get', 'post', 'put', 'del', 'any', 'ws', 'patch', 'listen', 'connect', 'options', 'trace', 'publish', 'head']
-const exclude = ['ws', 'listen', 'connect', 'options', 'trace']
+
+function parseCookies(cookieHeader = '') {
+    const cookies = cookieHeader.split(/; */);
+    const decode = decodeURIComponent;
+
+    if (cookies[0] === '') return {};
+
+    const result = {};
+    for (let cookie of cookies) {
+        const isKeyValue = cookie.includes('=');
+
+        if (!isKeyValue) {
+            result[cookie.trim()] = true;
+            continue;
+        }
+
+        let [key, value] = cookie.split('=');
+
+        key.trim();
+        value.trim();
+
+        if ('"' === value[0]) value = value.slice(1, -1);
+
+        try {
+            value = decode(value);
+        } catch (error) {
+            // neglect
+        }
+        result[key] = value;
+    }
+
+    return result;
+};
+
+async function parseBody(response) {
+    let chunks;
+    return new Promise((resolve, reject) => {
+        response.onData((ab, isLast) => {
+            let chunk = Buffer.from(ab);
+            chunks = chunks ? Buffer.concat([chunks, chunk]) : Buffer.concat([chunk]);
+            if (isLast) {
+                try {
+                    resolve(chunks);
+                } catch (error) {
+                    resolve({});
+                }
+            }
+        });
+    });
+};
+
+async function requestParser(options) {
+    if (!options) options = {};
+    if (!options.uploadPath) options.uploadPath = './';
+    if (!options.limits) options.limits = {};
+    const that = this;
+    return new Promise(async (resolve, reject) => {
+        try {
+            const buffer = await parseBody(that);
+            let context = {};
+            context.body = {};
+            const headers = that.headers;
+            context.headers = headers;
+            if (headers['cookie']) context.cookies = parseCookies(headers['cookie']);
+            if (buffer.length > 0) {
+                const contentType = headers['content-type'].split(';')[0];
+                switch (contentType) {
+                    case 'text/plain':
+                        context.body = buffer.toString();
+                        resolve(context);
+                        break;
+                    case 'application/x-www-form-urlencoded':
+                        const form = querystring.parse(buffer.toString());
+                        context.body = form;
+                        resolve(context);
+                        break;
+                    case 'application/json':
+                        const body = JSON.parse(buffer);
+                        if (typeof body === "object") {
+                            context.body = body;
+                        }
+                        resolve(context);
+                        break;
+                    case 'multipart/form-data':
+                        const busboy = new Busboy({ headers, limits: options.limits });
+                        busboy.on('file', function (fieldname, file, filename, encoding, mimetype) {
+                            let extension = filename.split('.');
+                            extension = extension[extension.length - 1];
+                            let newFile = null;
+                            if (options.uniquePaths) {
+                                newFile = uuid() + '.' + extension;
+                                fstream = fs.createWriteStream(options.uploadPath + newFile);
+                            } else {
+                                fstream = fs.createWriteStream(options.uploadPath + filename);
+                            }
+
+                            if (typeof options.fileLimit == 'function') file.on('limit', () => {
+                                options.fileLimit(fieldname, file, filename, encoding, mimetype);
+                            });
+
+                            let bytes = 0;
+                            file.on('data', function (data) {
+                                bytes = bytes + data.length;
+                            })
+
+                            file.pipe(fstream);
+                            fstream.on('close', function () {
+                                if (typeof options.fstreamClosed == 'function') options.fstreamClosed(fieldname, file, filename, encoding, mimetype);
+                            });
+                            file.on('end', () => {
+                                if (typeof options.fileEnd == 'function') options.fileEnd(fieldname, file, filename, encoding, mimetype);
+                                if (!context.body[fieldname]) context.body[fieldname] = [];
+                                let pushed = {
+                                    filename: filename,
+                                    encoding,
+                                    mimetype,
+                                    bytes: bytes
+                                };
+                                if (newFile) pushed.uniquePath = newFile;
+                                context.body[fieldname].push(pushed)
+                            });
+                        });
+                        busboy.on('field', (fieldname, val) => {
+                            const { params } = context;
+                            context.body = { ...params, [fieldname]: val };
+                        });
+                        busboy.on('finish', () => {
+                            resolve(context)
+                        });
+                        busboy.end(buffer);
+                        break;
+                }
+            }
+        } catch (e) {
+            reject(e);
+        }
+    })
+}
 
 const uExpress = function (options = {}) {
     this.uWS = uWS;
@@ -95,6 +234,7 @@ const uExpress = function (options = {}) {
 
     this.stack = [];
     this.req = {};
+    this.kind = 'app_instance';
 
     this.patchReq = (req) => {
         req = Object.assign(req, this.req);
@@ -107,75 +247,19 @@ const uExpress = function (options = {}) {
         res.status = status;
         res.send = send;
         res.sendFile = sendFile;
+        res.requestParser = requestParser;
         return res;
     };
 
-    this.bodyParser = function (type, res, cb) {
-        let buffer;
-        let err = false;
-        if (type == 'json') {
-            res.onData((ab, isLast) => {
-                let chunk = Buffer.from(ab);
-                if (isLast) {
-                    let json;
-                    if (buffer) {
-                        try {
-                            json = JSON.parse(Buffer.concat([buffer, chunk]));
-                        } catch (e) {
-                            err = e;
-                        } finally {
-                            cb(json, err);
-                        }
-                    } else {
-                        try {
-                            json = JSON.parse(chunk);
-                        } catch (e) {
-                            err = e;
-                        } finally {
-                            cb(json, err);
-                        }
-                    }
-                } else {
-                    if (buffer) {
-                        buffer = Buffer.concat([buffer, chunk]);
-                    } else {
-                        buffer = Buffer.concat([chunk]);
-                    }
-                }
-            });
-        } else if (type == 'raw') {
-            try {
-                res.onData((ab, isLast) => {
-                    let chunk = Buffer.from(ab);
-                    if (isLast) {
-                        if (buffer) {
-                            buffer += String(chunk);
-                        } else {
-                            buffer = String(chunk);
-                        }
-                        cb(buffer);
-                    } else {
-                        if (buffer) {
-                            buffer += String(chunk);
-                        } else {
-                            buffer = String(chunk);
-                        }
-                    }
-                });
-            } catch (e) {
-                err = e;
-            }
-        }
-
-        res.onAborted(cb(null, err));
-    }
-
     this.set = function (key, val) {
+        if (!key) throw 'Set key cannot be empty'
+        if (!val) throw 'Set value cannot be empty'
         this.req[key] = val;
         return this;
     }
 
     this.use = function use(fn) {
+        if (!fn) throw 'Use must have an argument'
         let offset = 0;
         let path = '/';
 
@@ -206,7 +290,13 @@ const uExpress = function (options = {}) {
                         this.stack.push({
                             path: path + cb.path, isMw: cb.isMw, method: cb.method, callback: function (res, req) {
                                 req = that.patchReq(req);
+                                let headers = {};
+                                req.forEach((k, v) => {
+                                    headers[k] = v;
+                                });
+                                res.headers = headers;
                                 res = that.patchRes(res);
+
                                 cb.callback(res, req);
                             }
                         })
@@ -240,15 +330,25 @@ const uExpress = function (options = {}) {
 
     const that = this;
     methods.forEach(method => {
-        uExpress.prototype[method] = function (path, callback) {
+        uExpress.prototype[method] = function () {
+            const args = Array.prototype.slice.call(arguments);
             if (method == 'ws') {
+                const path = args[0],
+                    options = args[1];
                 this.stack.push({
-                    path: path, method: method, callback: callback
+                    path: path, method: method, options: options
                 })
             } else {
+                const path = args[0],
+                    callback = args[1];
                 this.stack.push({
                     path: path, method: method, callback: function (res, req) {
                         req = that.patchReq(req);
+                        let headers = {};
+                        req.forEach((k, v) => {
+                            headers[k] = v;
+                        });
+                        res.headers = headers;
                         res = that.patchRes(res);
                         callback(res, req);
                     }
@@ -258,15 +358,40 @@ const uExpress = function (options = {}) {
         }
     });
 
+    this.inject = function (data) {
+        if (!data.inject) throw 'Injectable must include an "inject" object'
+        switch (data.inject.type) {
+            case 'ws':
+                this.ws(data.inject.path, data.inject.data)
+                break;
+            default:
+                break;
+        }
+    }
+
+    this.wss = function () {
+        const args = Array.prototype.slice.call(arguments);
+        this.inject = {
+            type: 'ws',
+            path: args[0],
+            data: { ...args[1] }
+        }
+        this.on = (handler, fn) => {
+            this.inject.data[handler] = fn;
+        }
+    }
+
     this.listen = function (port, cb) {
+        if (!port) throw 'You must pass port as an argument in app listen'
+        if (typeof cb != 'function') throw 'You must pass a callback as an argument in app listen'
         if (this.req.static) {
             this.get(this.req.static, (res, req) => {
                 const filename = p.join(process.cwd(), req.getUrl());
                 if (fs.existsSync(filename)) {
-                    const contentType = mime.lookup(filename);
+                    const contentType = mime.lookup(filename),
+                        totalSize = fs.statSync(filename).size,
+                        readStream = fs.createReadStream(filename);
                     res.writeHeader('Content-Type', contentType);
-                    const totalSize = fs.statSync(filename).size;
-                    const readStream = fs.createReadStream(filename);
                     pipeStreamOverResponse(res, readStream, totalSize);
                     res.onAborted(() => {
                         res.aborted = true;
@@ -287,11 +412,14 @@ const uExpress = function (options = {}) {
                     }
                 }
             } else {
-                this.app[route.method](route.path, route.callback);
+                if (route.method == 'ws') {
+                    this.app[route.method](route.path, route.options);
+                } else {
+                    this.app[route.method](route.path, route.callback);
+                }
             }
         }
         this.app.listen(port, cb);
-
     }
     return this;
 
