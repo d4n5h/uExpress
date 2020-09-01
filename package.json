@@ -24,8 +24,11 @@
   "homepage": "https://github.com/d4n5h/uExpress#readme",
   "dependencies": {
     "array-flatten": "^3.0.0",
+    "busboy": "^0.3.1",
     "mime-types": "^2.1.27",
     "path-match": "^1.2.4",
-    "uWebSockets.js": "github:uNetworking/uWebSockets.js#v18.3.0"
+    "querystring": "^0.2.0",
+    "uWebSockets.js": "github:uNetworking/uWebSockets.js#v18.3.0",
+    "uuid": "^8.3.0"
   }
 }
