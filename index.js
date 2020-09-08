@@ -119,12 +119,13 @@ function parseCookies(cookieHeader = '') {
     return result;
 };
 
-async function parseBody(response) {
+async function parseBody(response, cb) {
     let chunks;
     return new Promise((resolve, reject) => {
         response.onData((ab, isLast) => {
             let chunk = Buffer.from(ab);
             chunks = chunks ? Buffer.concat([chunks, chunk]) : Buffer.concat([chunk]);
+            cb(chunks.length);
             if (isLast) {
                 try {
                     resolve(chunks);
@@ -136,19 +137,24 @@ async function parseBody(response) {
     });
 };
 
-async function requestParser(options) {
+async function requestParser(options, cb) {
     if (!options) options = {};
     if (!options.uploadPath) options.uploadPath = './';
     if (!options.limits) options.limits = {};
     const that = this;
     return new Promise(async (resolve, reject) => {
         try {
-            const buffer = await parseBody(that);
             let context = {};
             context.body = {};
             const headers = that.headers;
             context.headers = headers;
             if (headers['cookie']) context.cookies = parseCookies(headers['cookie']);
+
+            // Progress Reporting
+            const buffer = await parseBody(that, (progress) => {
+                cb(Number(((progress / headers['content-length']) * 100).toFixed()));
+            });
+
             if (buffer.length > 0) {
                 const contentType = headers['content-type'].split(';')[0];
                 switch (contentType) {
