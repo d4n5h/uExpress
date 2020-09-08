@@ -86,13 +86,18 @@ app.post('/upload', (res, req) => {
         console.log(filename, 'Over limit!');
     }
     res.requestParser({
+        // Config
         limits: {},
         uploadPath: __dirname + '/files/',
         uniquePaths: true,
         fileEnd: fileEnd,
         fstreamClosed: fstreamClosed,
         fileLimit: limit
+    }, (progress) => {
+        // Get progress
+        console.log(progress);
     }).then((context) => {
+        // Finished
         res.status(200).json(context);
     });
 })
